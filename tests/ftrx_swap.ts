@@ -1,10 +1,24 @@
 import * as anchor from "@coral-xyz/anchor";
-import { Program } from "@coral-xyz/anchor";
+
 import { PublicKey } from "@solana/web3.js";
 import { FtrxSwap } from "../target/types/ftrx_swap";
 import { TestValues, createValues, expectRevert,mintingTokens } from "./utils";
 import { expect } from "chai";
-import { BN } from "bn.js";
+import { Program, BN, web3  } from "@coral-xyz/anchor";
+import { superUserKey } from "./testKeys";
+
+import {
+  getAccount,
+  getOrCreateAssociatedTokenAccount,
+  getAssociatedTokenAddressSync,
+  createAssociatedTokenAccountInstruction,
+  createSyncNativeInstruction,
+  createCloseAccountInstruction,
+  TOKEN_PROGRAM_ID,
+  ASSOCIATED_TOKEN_PROGRAM_ID,
+  NATIVE_MINT,
+  getMint,
+} from "@solana/spl-token";
 
 describe("ftrx_swap", () => {
   // Configure the client to use the local cluster.
@@ -13,214 +27,441 @@ describe("ftrx_swap", () => {
   const program = anchor.workspace.FtrxSwap as Program<FtrxSwap>;
   const connection = program.provider.connection;
 
-  it("Is initialized!", async () => {
-    // Add your test here.
-    const tx = await program.methods.initialize().rpc();
-    console.log("Your transaction signature", tx);
-  });
+
+  async function get_onchain_logs(connection,tx1){
+    
+    const { lastValidBlockHeight, blockhash } =
+    await connection.getLatestBlockhash();
+
+    let output_tx=await connection.confirmTransaction(
+      {
+        blockhash: blockhash,
+        lastValidBlockHeight: lastValidBlockHeight,
+        signature: tx1,
+      },
+      "confirmed",
+    );
+    const txDetails = await connection.getTransaction(tx1, {
+      maxSupportedTransactionVersion: 0,
+      commitment: "confirmed",
+    });
+    console.log("SWAP DETAILS",txDetails.meta.logMessages)
+  }
 
 
-
-  
+  //Creating mints
   let values: TestValues;
   values = createValues();
+  // Setting the LP fee for the new pool
+  let new_pool_lp_fee_in_bp=10
+  const lpFeeBuffer = Buffer.alloc(2) // 2 bytes for u16
+  lpFeeBuffer.writeUInt16LE(new_pool_lp_fee_in_bp) 
+
+  //Creating the PDAs
+  const superUser = superUserKey.keypair;
+  let [poolKey, poolBump] =
+  web3.PublicKey.findProgramAddressSync(
+    [
+      values.mintAKeypair.publicKey.toBuffer(),
+      values.mintBKeypair.publicKey.toBuffer(),
+      superUserKey.pubKey.toBuffer(),
+      lpFeeBuffer,
+
+    ],
+    program.programId
+  );
 
 
-  it("AMM Creation", async () => {
-    let tx1=await program.methods
-      .createAmm(values.id, values.fee)
-      .accounts({ amm: values.ammKey, admin: values.admin.publicKey })
-      .rpc();
-
-    const ammAccount = await program.account.simpleAmm.fetch(values.ammKey);
-    console.log("AMM account")
-    console.log(values.ammKey)
-    console.log(ammAccount)
-    expect(ammAccount.id.toString()).to.equal(values.id.toString());
-    expect(ammAccount.admin.toString()).to.equal(
-      values.admin.publicKey.toString()
-    );
-    expect(ammAccount.fee.toString()).to.equal(values.fee.toString());
-  });
+  let [lpTokenKey, lpTokenBump] =
+  web3.PublicKey.findProgramAddressSync(
+    [
+      values.mintAKeypair.publicKey.toBuffer(),
+      values.mintBKeypair.publicKey.toBuffer(),
+      superUserKey.pubKey.toBuffer(),
+      Buffer.from("liquidity"),
+    ],
+    program.programId
+  );
 
 
+  let [mintAVaultKey, mintAVaultBump] =
+  web3.PublicKey.findProgramAddressSync(
+    [
+      values.mintAKeypair.publicKey.toBuffer(),
+      poolKey.toBuffer(),
+    ],
+    program.programId
+  );
+
+  let [mintBVaultKey, mintBVaultBump] =
+  web3.PublicKey.findProgramAddressSync(
+    [
+      values.mintBKeypair.publicKey.toBuffer(),
+      poolKey.toBuffer(),
+    ],
+    program.programId
+  );
+
+  let [mintATreasuryKey, mintATreasuryBump] =
+  web3.PublicKey.findProgramAddressSync(
+    [
+      values.mintAKeypair.publicKey.toBuffer(),
+      poolKey.toBuffer(),
+      Buffer.from("treasury"),
+      superUserKey.pubKey.toBuffer(),
+    ],
+    program.programId
+  );
+
+  let [mintBTreasuryKey, mintBTreasuryBump] =
+  web3.PublicKey.findProgramAddressSync(
+    [
+      values.mintBKeypair.publicKey.toBuffer(),
+      poolKey.toBuffer(),
+      Buffer.from("treasury"),
+      superUserKey.pubKey.toBuffer(),
+    ],
+    program.programId
+  );
+
+  //Setting the account structure
+  let accounts={
+    pool: poolKey,
+    admin: superUserKey.pubKey,
+    mintLiquidity: lpTokenKey,
+    mintA: values.mintAKeypair.publicKey,
+    mintB: values.mintBKeypair.publicKey,
+    poolAccountA: mintAVaultKey,
+    poolAccountB: mintBVaultKey,
+    treasuryMintA: mintATreasuryKey,
+    treasuryMintB: mintBTreasuryKey,
+    payer:superUserKey.pubKey,
+    depositorAccountLiquidity: values.liquidityAccount,
+    depositorAccountA: values.holderAccountA,
+    depositorAccountB: values.holderAccountB,
+    traderAccountA: values.holderAccountA,
+    traderAccountB: values.holderAccountB,
+    depositor: superUserKey.pubKey,
+  }
 
   it("Pool Creation", async () => {
 
+    //Minting 100 token A and token B to the superUser
     await mintingTokens({
       connection,
-      creator: values.admin,
+      creator: superUser,
       mintAKeypair: values.mintAKeypair,
       mintBKeypair: values.mintBKeypair,
     });
     
-    const ammAccount = await program.account.simpleAmm.fetch(values.ammKey);
-    console.log("AMM account before")
-    console.log(ammAccount)
+    // Creating the pool
+    let pool_lp_fee=new BN(new_pool_lp_fee_in_bp)
     await program.methods
-      .createPool()
-      .accounts({
-        amm: values.ammKey,
-        pool: values.poolKey,
-        poolAuthority: values.poolAuthority,
-        mintLiquidity: values.mintLiquidity,
-        mintA: values.mintAKeypair.publicKey,
-        mintB: values.mintBKeypair.publicKey,
-        poolAccountA: values.poolAccountA,
-        poolAccountB: values.poolAccountB,
-      })
+      .createPool(10,poolBump,mintAVaultBump,mintBVaultBump,mintATreasuryBump,mintBTreasuryBump)
+      .accounts(accounts)
       .rpc();
+
+
   });
 
-  it("Invalid mints", async () => {
 
-    await expectRevert(
-      program.methods
-        .createPool()
-        .accounts({
-          amm: values.ammKey,
-          pool: values.poolKey,
-          poolAuthority: values.poolAuthority,
-          mintLiquidity: values.mintLiquidity,
-          mintA: values.mintAKeypair.publicKey,
-          mintB: values.mintBKeypair.publicKey,
-          poolAccountA: values.poolAccountA,
-          poolAccountB: values.poolAccountB,
-        })
-        .rpc()
+
+
+  it("Creating uas ", async () => {
+
+    const lptokenUTA = await getOrCreateAssociatedTokenAccount(
+      connection,
+      superUser,
+      lpTokenKey,
+      superUser.publicKey,
+      true
     );
+    
+    const minAUTA = await getOrCreateAssociatedTokenAccount(
+      connection,
+      superUser,
+      values.mintAKeypair.publicKey,
+      superUser.publicKey,
+      true
+    );
+
+    const minBUTA = await getOrCreateAssociatedTokenAccount(
+      connection,
+      superUser,
+      values.mintBKeypair.publicKey,
+      superUser.publicKey,
+      true
+    );
+
+
+    accounts.depositorAccountA= minAUTA.address
+    accounts.depositorAccountB= minBUTA.address
+    accounts.depositorAccountLiquidity= lptokenUTA.address
+    
+
+    accounts.traderAccountA= minAUTA.address
+    accounts.traderAccountB= minBUTA.address
+
+    
+
   });
-
-
-
   
-  it("Deposit equal amounts", async () => {
+  it("Deposit equal amounts first deposit", async () => {
 
+    const traderTokenAccountA_before = await connection.getTokenAccountBalance(
+      accounts.depositorAccountA
+    );
+    const traderTokenAccountB_before = await connection.getTokenAccountBalance(
+      accounts.depositorAccountB
+    );
 
+    const traderLPToken_before = await connection.getTokenAccountBalance(
+      accounts.depositorAccountLiquidity
+    );
 
+    const poolTokenAccountA_before = await connection.getTokenAccountBalance(
+      accounts.poolAccountA
+    );
+    const poolTokenAccountB_before = await connection.getTokenAccountBalance(
+      accounts.poolAccountB
+    );
+
+    console.log("Depositing ",values.depositAmountA.toString()," of token A ", values.depositAmountA.toString()," of token B")
     await program.methods
-      .depositLiquidity(values.depositAmountA, values.depositAmountA)
-      .accounts({
-        pool: values.poolKey,
-        poolAuthority: values.poolAuthority,
-        depositor: values.admin.publicKey,
-        mintLiquidity: values.mintLiquidity,
-        mintA: values.mintAKeypair.publicKey,
-        mintB: values.mintBKeypair.publicKey,
-        poolAccountA: values.poolAccountA,
-        poolAccountB: values.poolAccountB,
-        depositorAccountLiquidity: values.liquidityAccount,
-        depositorAccountA: values.holderAccountA,
-        depositorAccountB: values.holderAccountB,
-      })
-      .signers([values.admin])
+      .depositLiquidity(values.depositAmountA, values.depositAmountA,new BN(0))
+      .accounts(accounts)
+ 
       .rpc();
 
-    const depositTokenAccountLiquditiy =
-      await connection.getTokenAccountBalance(values.liquidityAccount);
-    expect(depositTokenAccountLiquditiy.value.amount).to.equal(
-      values.depositAmountA.sub(values.minimumLiquidity).toString()
-    );
-    const depositTokenAccountA = await connection.getTokenAccountBalance(
-      values.holderAccountA
-    );
-    expect(depositTokenAccountA.value.amount).to.equal(
-      values.defaultSupply.sub(values.depositAmountA).toString()
-    );
-    const depositTokenAccountB = await connection.getTokenAccountBalance(
-      values.holderAccountB
-    );
-    expect(depositTokenAccountB.value.amount).to.equal(
-      values.defaultSupply.sub(values.depositAmountA).toString()
-    );
-  });
+      const traderTokenAccountA_after = await connection.getTokenAccountBalance(
+        accounts.depositorAccountA
+      );
+      const traderTokenAccountB_after = await connection.getTokenAccountBalance(
+        accounts.depositorAccountB
+      );
+  
+      const traderLPToken_after = await connection.getTokenAccountBalance(
+        accounts.depositorAccountLiquidity
+      );
+  
+      const poolTokenAccountA_after = await connection.getTokenAccountBalance(
+        accounts.poolAccountA
+      );
+      const poolTokenAccountB_after = await connection.getTokenAccountBalance(
+        accounts.poolAccountB
+      );
+
+      console.log("Token A before and after user side",traderTokenAccountA_before.value.uiAmount,traderTokenAccountA_after.value.uiAmount,)
+      console.log("Token B before and after user side",traderTokenAccountB_before.value.uiAmount,traderTokenAccountB_after.value.uiAmount,)
+      console.log("Token A before and after pool side",poolTokenAccountA_before.value.uiAmount,poolTokenAccountA_after.value.uiAmount,)
+      console.log("Token B before and after pool side",poolTokenAccountB_before.value.uiAmount,poolTokenAccountB_after.value.uiAmount,)
+    
+      console.log("LP token before and after user side",traderLPToken_before.value.uiAmount,traderLPToken_after.value.uiAmount,)
+  
+    });
+
 
 
   it("Swap from A to B", async () => {
     const input = new BN(10 ** 6);
-    await program.methods
-      .simpleSwap(true, input, new BN(100))
-      .accounts({
-        amm: values.ammKey,
-        pool: values.poolKey,
-        poolAuthority: values.poolAuthority,
-        trader: values.admin.publicKey,
-        mintA: values.mintAKeypair.publicKey,
-        mintB: values.mintBKeypair.publicKey,
-        poolAccountA: values.poolAccountA,
-        poolAccountB: values.poolAccountB,
-        traderAccountA: values.holderAccountA,
-        traderAccountB: values.holderAccountB,
-      })
-      .signers([values.admin])
-      .rpc({ skipPreflight: true });
+
+    const poolTokenAccountA_before = await connection.getTokenAccountBalance(
+      accounts.poolAccountA
+    );
+    const poolTokenAccountB_before = await connection.getTokenAccountBalance(
+      accounts.poolAccountB
+    );
+
+    const traderTokenAccountA_before = await connection.getTokenAccountBalance(
+      accounts.depositorAccountA
+    );
+    const traderTokenAccountB_before = await connection.getTokenAccountBalance(
+      accounts.depositorAccountB
+    );
+
+
+
+    console.log("TOKEN A start : ",poolTokenAccountA_before.value.uiAmount)
+    console.log("TOKEN B start : ",poolTokenAccountB_before.value.uiAmount)
+    
+    let tx1= await program.methods
+      .simpleSwapExactIn(true, input, new BN(100))
+      .accounts(accounts)
+      .rpc();
 
     const traderTokenAccountA = await connection.getTokenAccountBalance(
-      values.holderAccountA
+      accounts.depositorAccountA
     );
     const traderTokenAccountB = await connection.getTokenAccountBalance(
-      values.holderAccountB
+      accounts.depositorAccountB
     );
-    if(false){
-      expect(traderTokenAccountA.value.amount).to.equal(
-        values.defaultSupply.sub(values.depositAmountA).sub(input).toString()
+
+
+    const { lastValidBlockHeight, blockhash } =
+    await connection.getLatestBlockhash();
+
+    let output_tx=await connection.confirmTransaction(
+      {
+        blockhash: blockhash,
+        lastValidBlockHeight: lastValidBlockHeight,
+        signature: tx1,
+      },
+      "confirmed",
+    );
+    const txDetails = await program.provider.connection.getTransaction(tx1, {
+      maxSupportedTransactionVersion: 0,
+      commitment: "confirmed",
+    });
+    console.log("SWAP DETAILS",txDetails.meta.logMessages)
+
+    if(true){
+
+      let impact_token_A=Number(traderTokenAccountA.value.amount)-Number(traderTokenAccountA_before.value.amount)
+      let impact_token_B=Number(traderTokenAccountB.value.amount)-Number(traderTokenAccountB_before.value.amount)
+      console.log("TOKEN A impact : ",impact_token_A)
+      console.log("TOKEN B impact : ",impact_token_B)
+      
+    }
+  });
+
+
+  
+  it("Deposit equal amounts second deposit", async () => {
+
+    const traderTokenAccountA_before = await connection.getTokenAccountBalance(
+      accounts.depositorAccountA
+    );
+    const traderTokenAccountB_before = await connection.getTokenAccountBalance(
+      accounts.depositorAccountB
+    );
+
+    const traderLPToken_before = await connection.getTokenAccountBalance(
+      accounts.depositorAccountLiquidity
+    );
+
+    const poolTokenAccountA_before = await connection.getTokenAccountBalance(
+      accounts.poolAccountA
+    );
+    const poolTokenAccountB_before = await connection.getTokenAccountBalance(
+      accounts.poolAccountB
+    );
+
+    let invariant=Number(poolTokenAccountA_before.value.amount)*Number(poolTokenAccountB_before.value.amount)
+    console.log("invariant",invariant)
+    let amountB=invariant/Number(values.depositAmountA)
+    console.log("amountB",amountB,values.depositAmountA)
+    console.log("Depositing ",values.depositAmountA.toString()," of token A ", values.depositAmountA.toString()," of token B")
+    let tx1=await program.methods
+      .depositLiquidity(values.depositAmountA, values.depositAmountA,new BN(0))
+      .accounts(accounts)
+  
+      .rpc();
+
+      get_onchain_logs(connection,tx1)
+      const traderTokenAccountA_after = await connection.getTokenAccountBalance(
+        accounts.depositorAccountA
       );
-      expect(Number(traderTokenAccountB.value.amount)).to.be.greaterThan(
-        values.defaultSupply.sub(values.depositAmountB).toNumber()
+      const traderTokenAccountB_after = await connection.getTokenAccountBalance(
+        accounts.depositorAccountB
       );
-      expect(Number(traderTokenAccountB.value.amount)).to.be.lessThan(
-        values.defaultSupply.sub(values.depositAmountB).add(input).toNumber()
+  
+      const traderLPToken_after = await connection.getTokenAccountBalance(
+        accounts.depositorAccountLiquidity
       );
+  
+      const poolTokenAccountA_after = await connection.getTokenAccountBalance(
+        accounts.poolAccountA
+      );
+      const poolTokenAccountB_after = await connection.getTokenAccountBalance(
+        accounts.poolAccountB
+      );
+
+      console.log("Token A before and after user side",traderTokenAccountA_before.value.uiAmount,traderTokenAccountA_after.value.uiAmount,)
+      console.log("Token B before and after user side",traderTokenAccountB_before.value.uiAmount,traderTokenAccountB_after.value.uiAmount,)
+      console.log("Token A before and after pool side",poolTokenAccountA_before.value.uiAmount,poolTokenAccountA_after.value.uiAmount,)
+      console.log("Token B before and after pool side",poolTokenAccountB_before.value.uiAmount,poolTokenAccountB_after.value.uiAmount,)
+      console.log("LP token before and after user side",traderLPToken_before.value.uiAmount,traderLPToken_after.value.uiAmount,)
+  
+    });
+
+    
+
+  it("Swap from B to A", async () => {
+    const input = new BN(10 ** 6);
+
+    const poolTokenAccountA_before = await connection.getTokenAccountBalance(
+      accounts.poolAccountA
+    );
+    const poolTokenAccountB_before = await connection.getTokenAccountBalance(
+      accounts.poolAccountB
+    );
+
+    const traderTokenAccountA_before = await connection.getTokenAccountBalance(
+      accounts.depositorAccountA
+    );
+    const traderTokenAccountB_before = await connection.getTokenAccountBalance(
+      accounts.depositorAccountB
+    );
+
+
+
+    console.log("TOKEN A start : ",poolTokenAccountA_before.value.uiAmount)
+    console.log("TOKEN B start : ",poolTokenAccountB_before.value.uiAmount)
+    
+    let tx1= await program.methods
+      .simpleSwapExactIn(false, input, new BN(100))
+      .accounts(accounts)
+      .rpc();
+
+    const traderTokenAccountA = await connection.getTokenAccountBalance(
+      accounts.depositorAccountA
+    );
+    const traderTokenAccountB = await connection.getTokenAccountBalance(
+      accounts.depositorAccountB
+    );
+
+
+
+    if(true){
+
+      let impact_token_A=Number(traderTokenAccountA.value.amount)-Number(traderTokenAccountA_before.value.amount)
+      let impact_token_B=Number(traderTokenAccountB.value.amount)-Number(traderTokenAccountB_before.value.amount)
+      console.log("TOKEN A impact : ",impact_token_A)
+      console.log("TOKEN B impact : ",impact_token_B)
+      
     }
   });
 
 
 
   it("Withdraw everything", async () => {
-    await program.methods
-      .withdrawLiquidity(values.depositAmountA.sub(values.minimumLiquidity))
-      .accounts({
-        amm: values.ammKey,
-        pool: values.poolKey,
-        poolAuthority: values.poolAuthority,
-        depositor: values.admin.publicKey,
-        mintLiquidity: values.mintLiquidity,
-        mintA: values.mintAKeypair.publicKey,
-        mintB: values.mintBKeypair.publicKey,
-        poolAccountA: values.poolAccountA,
-        poolAccountB: values.poolAccountB,
-        depositorAccountLiquidity: values.liquidityAccount,
-        depositorAccountA: values.holderAccountA,
-        depositorAccountB: values.holderAccountB,
-      })
-      .signers([values.admin])
-      .rpc({ skipPreflight: true });
+    let tx1=await program.methods
+      .withdrawLiquidity(new BN(1_000_000),new BN(0),new BN(0))
+      .accounts(accounts)
+      .signers([superUser])
+      .rpc();
 
-    const liquidityTokenAccount = await connection.getTokenAccountBalance(
-      values.liquidityAccount
-    );
-    const depositTokenAccountA = await connection.getTokenAccountBalance(
-      values.holderAccountA
-    );
-    const depositTokenAccountB = await connection.getTokenAccountBalance(
-      values.holderAccountB
-    );
 
-    if (false){
-      expect(liquidityTokenAccount.value.amount).to.equal("0");
-      expect(Number(depositTokenAccountA.value.amount)).to.be.lessThan(
-        values.defaultSupply.toNumber()
+    
+      const { lastValidBlockHeight, blockhash } =
+      await connection.getLatestBlockhash();
+  
+      let output_tx=await connection.confirmTransaction(
+        {
+          blockhash: blockhash,
+          lastValidBlockHeight: lastValidBlockHeight,
+          signature: tx1,
+        },
+        "confirmed",
       );
-      expect(Number(depositTokenAccountA.value.amount)).to.be.greaterThan(
-        values.defaultSupply.sub(values.depositAmountA).toNumber()
-      );
-      expect(Number(depositTokenAccountB.value.amount)).to.be.lessThan(
-        values.defaultSupply.toNumber()
-      );
-      expect(Number(depositTokenAccountB.value.amount)).to.be.greaterThan(
-        values.defaultSupply.sub(values.depositAmountA).toNumber()
-      );
-    }
+      const txDetails = await program.provider.connection.getTransaction(tx1, {
+        maxSupportedTransactionVersion: 0,
+        commitment: "confirmed",
+      });
+      console.log("WITHDRAWAL DETAILS",txDetails.meta.logMessages)
+
+      
+
   });
 
   

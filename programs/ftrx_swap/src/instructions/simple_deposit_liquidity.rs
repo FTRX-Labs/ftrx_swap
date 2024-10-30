@@ -16,7 +16,9 @@ pub fn deposit_liquidity(
     ctx: Context<DepositLiquidity>,
     amount_a: u64,
     amount_b: u64,
+    expected_lp_token:u64
 ) -> Result<()> {
+
     // Prevent depositing assets the depositor does not own
     let mut amount_a = if amount_a > ctx.accounts.depositor_account_a.amount {
         ctx.accounts.depositor_account_a.amount
@@ -29,43 +31,81 @@ pub fn deposit_liquidity(
         amount_b
     };
 
-    // Making sure they are provided in the same proportion as existing liquidity
     let pool_a = &ctx.accounts.pool_account_a;
     let pool_b = &ctx.accounts.pool_account_b;
-    // Defining pool creation like this allows attackers to frontrun pool creation with bad ratios
+
+    //Saving amounts of token a and b for end of instruction checks
+    let amount_a_before=I64F64::from_num(pool_a.amount);
+    let amount_b_before=I64F64::from_num(pool_b.amount);
+
+    // Is it the first time we deposit amounts in the pool ?
     let pool_creation = pool_a.amount == 0 && pool_b.amount == 0;
+
+    //Calculating price as a ratio before deposit if there is available liquidity
+    let mut a_sup_b=false;
+    let mut ratio_price_check=I64F64::from_num(1);
+    if !pool_creation{
+        //If the pool was already created
+        msg!(
+            "Amounts before A {}  B {} ",
+            pool_a.amount,
+            pool_b.amount,
+        );
+
+        //Calculating ratio before deposit assuming poolb has more token than poola
+        //For precision, we'll evaluate a/b if a>b, and b/a otherwise
+        if pool_a.amount>pool_b.amount{
+            a_sup_b=true;
+            ratio_price_check=I64F64::from_num(pool_a.amount).checked_div(I64F64::from_num(pool_b.amount)).unwrap();
+        }else{
+            ratio_price_check=I64F64::from_num(pool_b.amount).checked_div(I64F64::from_num(pool_a.amount)).unwrap();
+        
+        }
+    }
+    //DONE - Calculating price as a ratio before deposit if there is available liquidity
+
+    // Initializing or making sure the price ratio constraint is respected
     (amount_a, amount_b) = if pool_creation {
         // Add as is if there is no liquidity
         (amount_a, amount_b)
     } else {
-        let ratio = I64F64::from_num(pool_a.amount)
-            .checked_mul(I64F64::from_num(pool_b.amount))
-            .unwrap();
-        if pool_a.amount > pool_b.amount {
+        if a_sup_b{
+            // ratio_price_check is a/b and added_a should be added_b*ratio_price_check
             (
                 I64F64::from_num(amount_b)
-                    .checked_mul(ratio)
-                    .unwrap()
+                    .checked_mul(ratio_price_check)
+                    .unwrap().ceil()
                     .to_num::<u64>(),
                 amount_b,
             )
+            
         } else {
+            // ratio_price_check is b/a and added_b should be added_a*ratio_price_check
             (
                 amount_a,
                 I64F64::from_num(amount_a)
-                    .checked_div(ratio)
-                    .unwrap()
+                    .checked_mul(ratio_price_check)
+                    .unwrap().ceil()
                     .to_num::<u64>(),
             )
         }
     };
+
+
+    // Computing the amount of liquidity sitting in the pool
+    let  liquidity_before = I64F64::from_num(pool_a.amount)
+    .checked_mul(I64F64::from_num(pool_b.amount))
+    .unwrap()
+    .sqrt();
 
     // Computing the amount of liquidity about to be deposited
     let mut liquidity = I64F64::from_num(amount_a)
         .checked_mul(I64F64::from_num(amount_b))
         .unwrap()
         .sqrt()
+        .floor()
         .to_num::<u64>();
+    
 
     // Lock some minimum liquidity on the first deposit
     if pool_creation {
@@ -74,6 +114,7 @@ pub fn deposit_liquidity(
         }
 
         liquidity -= MINIMUM_LIQUIDITY;
+  
     }
 
     // Transfer tokens to the pool
@@ -101,14 +142,21 @@ pub fn deposit_liquidity(
     )?;
 
     // Mint the liquidity to user
-    let authority_bump = *ctx.bumps.get("pool_authority").unwrap();
+
+    let actual_pool=&ctx.accounts.pool;
+    let lp_fee=actual_pool.lp_fee.to_le_bytes();
+    
     let authority_seeds = &[
-        &ctx.accounts.pool.amm.to_bytes(),
-        &ctx.accounts.mint_a.key().to_bytes(),
-        &ctx.accounts.mint_b.key().to_bytes(),
-        AUTHORITY_SEED.as_bytes(),
-        &[authority_bump],
+        actual_pool.mint_a.as_ref(),
+        actual_pool.mint_b.as_ref(),
+        actual_pool.admin.as_ref(),
+        lp_fee.as_ref(),
+        &[actual_pool.pool_bump],
     ];
+
+    
+
+
     let signer_seeds = &[&authority_seeds[..]];
     token::mint_to(
         CpiContext::new_with_signer(
@@ -116,12 +164,81 @@ pub fn deposit_liquidity(
             MintTo {
                 mint: ctx.accounts.mint_liquidity.to_account_info(),
                 to: ctx.accounts.depositor_account_liquidity.to_account_info(),
-                authority: ctx.accounts.pool_authority.to_account_info(),
+                authority: ctx.accounts.pool.to_account_info(),
             },
             signer_seeds,
         ),
         liquidity,
     )?;
+
+    //Making end of instruction checks
+    if liquidity<expected_lp_token{
+        return err!(FTRXSwapError::SlippageExceeded);
+    }
+    //We reload amounts
+    ctx.accounts.pool_account_a.reload()?;
+    ctx.accounts.pool_account_b.reload()?;
+
+    let new_pool_a_amount=ctx.accounts.pool_account_a.amount;
+    let new_pool_b_amount=ctx.accounts.pool_account_b.amount;
+
+
+    // If its not pool creation, we can make additional checks.
+    // These price ratio checks dont trigger any warnings and are for logs purposes
+    if !pool_creation{
+        if a_sup_b{
+            let ratio_price_check_after=I64F64::from_num(new_pool_a_amount).checked_div(I64F64::from_num(new_pool_b_amount)).unwrap();
+            let error_ratio_price=ratio_price_check_after.checked_div(ratio_price_check).unwrap().checked_sub(I64F64::from_num(1)).unwrap();
+            msg!(
+                "Ratio price before {}  after {} , error {}",
+                ratio_price_check,
+                ratio_price_check_after,
+                error_ratio_price
+            );
+
+
+            
+        }else{
+            let ratio_price_check_after=I64F64::from_num(new_pool_b_amount).checked_div(I64F64::from_num(new_pool_a_amount)).unwrap();
+            let error_ratio_price=ratio_price_check_after.checked_div(ratio_price_check).unwrap().checked_sub(I64F64::from_num(1)).unwrap();
+            msg!(
+                "Ratio price before {}  after {} , error {}",
+                ratio_price_check,
+                ratio_price_check_after,
+                error_ratio_price
+            );
+
+
+        }
+        // End of price ratio checks
+
+        // Checking the liquidity ratios vs new token ratios are in favor of the lp
+        //These are potentially triggering an error preventing from the tx to complete
+        // We want to have added_a/a_before > added_liquidity/liquidity_before
+        //and same for b
+        let ratio_liquidity_check_after=I64F64::from_num(liquidity).checked_div(liquidity_before).unwrap();
+        let ratio_a_check_after=I64F64::from_num(amount_a).checked_div(I64F64::from_num(amount_a_before)).unwrap();
+        let ratio_b_check_after=I64F64::from_num(amount_b).checked_div(I64F64::from_num(amount_b_before)).unwrap();
+        
+
+
+        msg!(
+            "Ratio liquidity {}, token_a {}, token_b {} {} {}",
+            ratio_liquidity_check_after,
+            ratio_a_check_after,
+            ratio_b_check_after,
+            ratio_liquidity_check_after<ratio_a_check_after,
+            ratio_liquidity_check_after<ratio_b_check_after,
+
+
+        );
+        if ratio_liquidity_check_after>ratio_a_check_after || ratio_liquidity_check_after>ratio_b_check_after{
+            return err!(FTRXSwapError::InconsistentPriceRatioLiquidity);
+        }
+        
+    }
+
+
 
     Ok(())
 }
@@ -130,27 +247,19 @@ pub fn deposit_liquidity(
 pub struct DepositLiquidity<'info> {
     #[account(
         seeds = [
-            pool.amm.as_ref(),
-            pool.mint_a.key().as_ref(),
-            pool.mint_b.key().as_ref(),
+         
+            mint_a.key().as_ref(),
+            mint_b.key().as_ref(),
+            pool.admin.key().as_ref(),
+            &pool.lp_fee.to_le_bytes(),
         ],
         bump,
         has_one = mint_a,
         has_one = mint_b,
+
     )]
     pub pool: Account<'info, SimplePool>,
 
-    /// CHECK: Read only authority
-    #[account(
-        seeds = [
-            pool.amm.as_ref(),
-            mint_a.key().as_ref(),
-            mint_b.key().as_ref(),
-            AUTHORITY_SEED.as_ref(),
-        ],
-        bump,
-    )]
-    pub pool_authority: AccountInfo<'info>,
 
     /// The account paying for all rents
     pub depositor: Signer<'info>,
@@ -158,10 +267,12 @@ pub struct DepositLiquidity<'info> {
     #[account(
         mut,
         seeds = [
-            pool.amm.as_ref(),
-            mint_a.key().as_ref(),
-            mint_b.key().as_ref(),
-            LIQUIDITY_SEED.as_ref(),
+          
+        mint_a.key().as_ref(),
+        mint_b.key().as_ref(),
+        pool.admin.key().as_ref(),
+        LIQUIDITY_SEED.as_ref(),
+
         ],
         bump,
     )]
@@ -173,15 +284,25 @@ pub struct DepositLiquidity<'info> {
 
     #[account(
         mut,
-        associated_token::mint = mint_a,
-        associated_token::authority = pool_authority,
+        token::mint = mint_a,
+        token::authority = pool,
+        seeds = [
+        mint_a.key().as_ref(),
+        pool.key().as_ref(),
+        ],
+        bump
     )]
     pub pool_account_a: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
-        associated_token::mint = mint_b,
-        associated_token::authority = pool_authority,
+        token::mint = mint_b,
+        token::authority = pool,
+        seeds = [
+        mint_b.key().as_ref(),
+        pool.key().as_ref(),
+        ],
+        bump
     )]
     pub pool_account_b: Box<Account<'info, TokenAccount>>,
 
@@ -193,17 +314,13 @@ pub struct DepositLiquidity<'info> {
     )]
     pub depositor_account_liquidity: Box<Account<'info, TokenAccount>>,
 
-    #[account(
-        init_if_needed,
-        payer = payer,
+    #[account(mut,
         associated_token::mint = mint_a,
         associated_token::authority = depositor,
     )]
     pub depositor_account_a: Box<Account<'info, TokenAccount>>,
 
-    #[account(
-        init_if_needed,
-        payer = payer,
+    #[account(mut,
         associated_token::mint = mint_b,
         associated_token::authority = depositor,
     )]

@@ -16,4 +16,19 @@ pub enum FTRXSwapError {
 
     #[msg("Invariant does not hold")]
     InvariantViolated,
+
+    #[msg("New invariant does not hold")]
+    NewInvariantViolated,
+
+    #[msg("OverFlow in swap calculation")]
+    MathOverflow,
+
+    #[msg("Inconsistent price ratio vs liquidity impact")]
+    InconsistentPriceRatioLiquidity,
+
+    #[msg("Slippage exceeded")]
+    SlippageExceeded,
+
+    
+
 }
