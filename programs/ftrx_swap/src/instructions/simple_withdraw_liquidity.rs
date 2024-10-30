@@ -4,29 +4,56 @@ use anchor_spl::{
     token::{self, Burn, Mint, Token, TokenAccount, Transfer},
 };
 use fixed::types::I64F64;
+use fixed_sqrt::FixedSqrt;
 
 use crate::{
     constants::{AUTHORITY_SEED, LIQUIDITY_SEED, MINIMUM_LIQUIDITY},
-    state::{SimpleAmm, SimplePool},
+    errors::FTRXSwapError,
+    state::SimplePool,
 };
 
-pub fn withdraw_liquidity(ctx: Context<WithdrawLiquidity>, amount: u64) -> Result<()> {
-    let authority_bump = *ctx.bumps.get("pool_authority").unwrap();
+pub fn withdraw_liquidity(ctx: Context<WithdrawLiquidity>, amount: u64, amount_expected_a: u64, amount_expected_b: u64) -> Result<()> {
+   
+
+
+    let actual_pool=&ctx.accounts.pool;
+    let lp_fee=actual_pool.lp_fee.to_le_bytes();
+    
+    let pool_a = &ctx.accounts.pool_account_a;
+    let pool_b = &ctx.accounts.pool_account_b;
+
+
+    let amount_a_before=I64F64::from_num(pool_a.amount);
+    let amount_b_before=I64F64::from_num(pool_b.amount);
+
+
     let authority_seeds = &[
-        &ctx.accounts.pool.amm.to_bytes(),
-        &ctx.accounts.mint_a.key().to_bytes(),
-        &ctx.accounts.mint_b.key().to_bytes(),
-        AUTHORITY_SEED.as_bytes(),
-        &[authority_bump],
+        actual_pool.mint_a.as_ref(),
+        actual_pool.mint_b.as_ref(),
+        actual_pool.admin.as_ref(),
+        lp_fee.as_ref(),
+        &[actual_pool.pool_bump],
     ];
     let signer_seeds = &[&authority_seeds[..]];
 
+
+
+
+
+    let  mint_liquidity_supply_before = ctx.accounts.mint_liquidity.supply + MINIMUM_LIQUIDITY;
+    let  invariant_before = I64F64::from_num(amount_a_before)
+    .checked_mul(I64F64::from_num(amount_b_before))
+    .unwrap().sqrt();
+ 
+
+
+    
     // Transfer tokens from the pool
     let amount_a = I64F64::from_num(amount)
         .checked_mul(I64F64::from_num(ctx.accounts.pool_account_a.amount))
         .unwrap()
         .checked_div(I64F64::from_num(
-            ctx.accounts.mint_liquidity.supply + MINIMUM_LIQUIDITY,
+            mint_liquidity_supply_before 
         ))
         .unwrap()
         .floor()
@@ -37,7 +64,7 @@ pub fn withdraw_liquidity(ctx: Context<WithdrawLiquidity>, amount: u64) -> Resul
             Transfer {
                 from: ctx.accounts.pool_account_a.to_account_info(),
                 to: ctx.accounts.depositor_account_a.to_account_info(),
-                authority: ctx.accounts.pool_authority.to_account_info(),
+                authority: ctx.accounts.pool.to_account_info(),
             },
             signer_seeds,
         ),
@@ -48,18 +75,20 @@ pub fn withdraw_liquidity(ctx: Context<WithdrawLiquidity>, amount: u64) -> Resul
         .checked_mul(I64F64::from_num(ctx.accounts.pool_account_b.amount))
         .unwrap()
         .checked_div(I64F64::from_num(
-            ctx.accounts.mint_liquidity.supply + MINIMUM_LIQUIDITY,
+            mint_liquidity_supply_before,
         ))
         .unwrap()
         .floor()
         .to_num::<u64>();
+
+
     token::transfer(
         CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
             Transfer {
                 from: ctx.accounts.pool_account_b.to_account_info(),
                 to: ctx.accounts.depositor_account_b.to_account_info(),
-                authority: ctx.accounts.pool_authority.to_account_info(),
+                authority: ctx.accounts.pool.to_account_info(),
             },
             signer_seeds,
         ),
@@ -74,30 +103,84 @@ pub fn withdraw_liquidity(ctx: Context<WithdrawLiquidity>, amount: u64) -> Resul
             Burn {
                 mint: ctx.accounts.mint_liquidity.to_account_info(),
                 from: ctx.accounts.depositor_account_liquidity.to_account_info(),
-                authority: ctx.accounts.depositor.to_account_info(),
+                authority: ctx.accounts.payer.to_account_info(),
             },
         ),
         amount,
     )?;
+
+
+
+
+    if amount_expected_a>amount_a{
+        return err!(FTRXSwapError::SlippageExceeded);
+    }
+
+    if amount_expected_b>amount_b{
+        return err!(FTRXSwapError::SlippageExceeded);
+    }
+
+    ctx.accounts.pool_account_a.reload()?;
+    ctx.accounts.pool_account_b.reload()?;
+    ctx.accounts.mint_liquidity.reload()?;
+
+    let  mint_liquidity_supply_after = ctx.accounts.mint_liquidity.supply + MINIMUM_LIQUIDITY;
+    let acc_a=ctx.accounts.pool_account_a.amount;
+    let acc_b=ctx.accounts.pool_account_b.amount;
+    let ratio_price_after = I64F64::from_num(acc_a)
+    .checked_div(I64F64::from_num(acc_b))
+    .unwrap();
+
+
+    let  invariant_after = I64F64::from_num(acc_a)
+    .checked_mul(I64F64::from_num(acc_b))
+    .unwrap().sqrt();
+
+
+    // Checks : we want to have liquidity_after/liquidity_before<amount_a_after/amount_a_before
+    let ratio_liquidity_check=I64F64::from_num(mint_liquidity_supply_after).checked_div(I64F64::from_num(mint_liquidity_supply_before)).unwrap();
+    let ratio_liquidity_check2=I64F64::from_num(invariant_after).checked_div(I64F64::from_num(invariant_before)).unwrap();
+    
+    let ratio_token_a_check=I64F64::from_num(acc_a).checked_div(I64F64::from_num(amount_a_before)).unwrap();
+    let ratio_token_b_check=I64F64::from_num(acc_b).checked_div(I64F64::from_num(amount_b_before)).unwrap();
+    //If thats not true for token a or token b we raise exception
+    if ratio_liquidity_check>ratio_token_a_check || ratio_liquidity_check>ratio_token_b_check{
+        return err!(FTRXSwapError::InconsistentPriceRatioLiquidity);
+    }
+    // NEED TO CHECK inconsistancy between ratio_liquidity_check and ratio_liquidity_check2
+    /*
+    msg!(
+        "tokenA after {}  tokenB  after {} , liquidity ratio {} {} token a ratio {} token b ratio {}",
+        ctx.accounts.pool_account_a.amount,
+        ctx.accounts.pool_account_b.amount,
+        ratio_liquidity_check,
+        ratio_liquidity_check2,
+        ratio_token_a_check,
+        ratio_token_b_check
+    );
+    */
+
+
+    
+
+
+
+   
 
     Ok(())
 }
 
 #[derive(Accounts)]
 pub struct WithdrawLiquidity<'info> {
-    #[account(
-        seeds = [
-            amm.id.as_ref()
-        ],
-        bump,
-    )]
-    pub amm: Account<'info, SimpleAmm>,
 
     #[account(
         seeds = [
-            pool.amm.as_ref(),
-            pool.mint_a.key().as_ref(),
-            pool.mint_b.key().as_ref(),
+       
+        mint_a.key().as_ref(),
+        mint_b.key().as_ref(),
+        pool.admin.key().as_ref(),
+        &pool.lp_fee.to_le_bytes(),
+
         ],
         bump,
         has_one = mint_a,
@@ -105,28 +188,17 @@ pub struct WithdrawLiquidity<'info> {
     )]
     pub pool: Account<'info, SimplePool>,
 
-    /// CHECK: Read only authority
-    #[account(
-        seeds = [
-            pool.amm.as_ref(),
-            mint_a.key().as_ref(),
-            mint_b.key().as_ref(),
-            AUTHORITY_SEED.as_ref(),
-        ],
-        bump,
-    )]
-    pub pool_authority: AccountInfo<'info>,
 
-    /// The account paying for all rents
-    pub depositor: Signer<'info>,
 
     #[account(
         mut,
         seeds = [
-            pool.amm.as_ref(),
-            mint_a.key().as_ref(),
-            mint_b.key().as_ref(),
-            LIQUIDITY_SEED.as_ref(),
+        
+        mint_a.key().as_ref(),
+        mint_b.key().as_ref(),
+        pool.admin.key().as_ref(),
+        LIQUIDITY_SEED.as_ref(),
+
         ],
         bump,
     )]
@@ -140,39 +212,46 @@ pub struct WithdrawLiquidity<'info> {
 
     #[account(
         mut,
-        associated_token::mint = mint_a,
-        associated_token::authority = pool_authority,
+        token::mint = mint_a,
+        token::authority = pool,
+        seeds = [
+        mint_a.key().as_ref(),
+        pool.key().as_ref(),
+        ],
+        bump
     )]
     pub pool_account_a: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
-        associated_token::mint = mint_b,
-        associated_token::authority = pool_authority,
+        token::mint = mint_b,
+        token::authority = pool,
+        seeds = [
+        mint_b.key().as_ref(),
+        pool.key().as_ref(),
+        ],
+        bump
     )]
     pub pool_account_b: Box<Account<'info, TokenAccount>>,
 
     #[account(
-        init_if_needed,
-        payer = payer,
+        mut,
         associated_token::mint = mint_liquidity,
-        associated_token::authority = depositor,
+        associated_token::authority = payer,
     )]
     pub depositor_account_liquidity: Box<Account<'info, TokenAccount>>,
 
     #[account(
-        init_if_needed,
-        payer = payer,
+        mut,
         associated_token::mint = mint_a,
-        associated_token::authority = depositor,
+        associated_token::authority = payer,
     )]
     pub depositor_account_a: Box<Account<'info, TokenAccount>>,
 
     #[account(
-        init_if_needed,
-        payer = payer,
+        mut,
         associated_token::mint = mint_b,
-        associated_token::authority = depositor,
+        associated_token::authority = payer,
     )]
     pub depositor_account_b: Box<Account<'info, TokenAccount>>,
 
