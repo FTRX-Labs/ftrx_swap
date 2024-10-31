@@ -86,13 +86,11 @@ pub fn deposit_liquidity(
     };
 
 
-    // Computing the amount of liquidity sitting in the pool
-    let  liquidity_before = I64F64::from_num(pool_a.amount)
-    .checked_mul(I64F64::from_num(pool_b.amount))
-    .unwrap()
-    .sqrt();
+    let  mint_liquidity_supply_before = ctx.accounts.mint_liquidity.supply + MINIMUM_LIQUIDITY;
+
 
     // Computing the amount of liquidity about to be deposited
+    // This formula will only be used for the pool creation ie the first deposit
     let mut liquidity = I64F64::from_num(amount_a)
         .checked_mul(I64F64::from_num(amount_b))
         .unwrap()
@@ -109,6 +107,10 @@ pub fn deposit_liquidity(
 
         liquidity -= MINIMUM_LIQUIDITY;
   
+    }else{
+        // For all deposits after the very first successful deposit, this is the relevant formula 
+        // for calculating the amount of LP token to mint
+        liquidity =I64F64::from_num(mint_liquidity_supply_before).checked_mul(I64F64::from_num(amount_a)).unwrap().checked_div(I64F64::from_num(pool_a.amount)).unwrap().floor().to_num::<u64>();
     }
 
     // Transfer tokens to the pool
@@ -172,6 +174,10 @@ pub fn deposit_liquidity(
     //We reload amounts
     ctx.accounts.pool_account_a.reload()?;
     ctx.accounts.pool_account_b.reload()?;
+    ctx.accounts.mint_liquidity.reload()?;
+
+    let  mint_liquidity_supply_after = ctx.accounts.mint_liquidity.supply + MINIMUM_LIQUIDITY;
+
 
     let new_pool_a_amount=ctx.accounts.pool_account_a.amount;
     let new_pool_b_amount=ctx.accounts.pool_account_b.amount;
@@ -181,16 +187,19 @@ pub fn deposit_liquidity(
 
     // Checking the liquidity ratios vs new token ratios are in favor of the lp
     //These are potentially triggering an error preventing from the tx to complete
-    // We want to have added_a/a_before > added_liquidity/liquidity_before
+    // We want to have added_a/a_before > added_lp_token_supply/lp_token_supply
     //and same for b
     if !pool_creation{
-        let ratio_liquidity_check_after=I64F64::from_num(liquidity).checked_div(liquidity_before).unwrap();
+
         let ratio_a_check_after=I64F64::from_num(amount_a).checked_div(I64F64::from_num(amount_a_before)).unwrap();
         let ratio_b_check_after=I64F64::from_num(amount_b).checked_div(I64F64::from_num(amount_b_before)).unwrap();
+        let ratio_supply_check_after=I64F64::from_num(liquidity).checked_div(I64F64::from_num(mint_liquidity_supply_before)).unwrap();
         
-        if ratio_liquidity_check_after>ratio_a_check_after || ratio_liquidity_check_after>ratio_b_check_after{
+        if ratio_supply_check_after>ratio_a_check_after || ratio_supply_check_after>ratio_b_check_after{
             return err!(FTRXSwapError::InconsistentPriceRatioLiquidity);
         }
+
+
     }
 
     Ok(())

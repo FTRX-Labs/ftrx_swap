@@ -15,6 +15,45 @@ use crate::{
 
 pub fn admin_gets_treasury(ctx: Context<AdminGetsTreasury>, amount_a: u64,amount_b: u64) -> Result<()> {
    
+    let actual_pool=&ctx.accounts.pool;
+    let lp_fee=actual_pool.lp_fee.to_le_bytes();
+
+    let authority_seeds = &[
+        actual_pool.mint_a.as_ref(),
+        actual_pool.mint_b.as_ref(),
+        actual_pool.admin.as_ref(),
+        lp_fee.as_ref(),
+        &[actual_pool.pool_bump],
+    ];
+    let signer_seeds = &[&authority_seeds[..]];
+
+
+    token::transfer(
+        CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.treasury_mint_a.to_account_info(),
+                to: ctx.accounts.depositor_account_a.to_account_info(),
+                authority: ctx.accounts.pool.to_account_info(),
+            },
+            signer_seeds,
+        ),
+        ctx.accounts.treasury_mint_a.amount,
+    )?;
+
+
+    token::transfer(
+        CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.treasury_mint_b.to_account_info(),
+                to: ctx.accounts.depositor_account_b.to_account_info(),
+                authority: ctx.accounts.pool.to_account_info(),
+            },
+            signer_seeds,
+        ),
+        ctx.accounts.treasury_mint_b.amount,
+    )?;
 
 
     Ok(())

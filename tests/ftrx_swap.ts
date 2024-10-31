@@ -434,36 +434,194 @@ describe("ftrx_swap", () => {
 
 
 
-  it("Withdraw everything", async () => {
+  it("First Withdraw everything", async () => {
+
+
+    
+    const poolTokenAccountA_before = await connection.getTokenAccountBalance(
+      accounts.poolAccountA
+    );
+    const poolTokenAccountB_before = await connection.getTokenAccountBalance(
+      accounts.poolAccountB
+    );
+
+    const traderTokenAccountA_before = await connection.getTokenAccountBalance(
+      accounts.depositorAccountA
+    );
+    const traderTokenAccountB_before = await connection.getTokenAccountBalance(
+      accounts.depositorAccountB
+    );
+
+
+
+    console.log("TOKEN A start in pool : ",poolTokenAccountA_before.value.uiAmount)
+    console.log("TOKEN B start in pool : ",poolTokenAccountB_before.value.uiAmount)
+    console.log("TOKEN A start in user wallet : ",traderTokenAccountA_before.value.uiAmount)
+    console.log("TOKEN B start in user wallet : ",traderTokenAccountB_before.value.uiAmount)
+
+
+
+    const traderLPToken_after = await connection.getTokenAccountBalance(
+      accounts.depositorAccountLiquidity
+    );
+
     let tx1=await program.methods
-      .withdrawLiquidity(new BN(1_000_000),new BN(0),new BN(0))
+      .withdrawLiquidity(new BN(traderLPToken_after.value.amount),new BN(0),new BN(0))
       .accounts(accounts)
       .signers([superUser])
       .rpc();
 
 
     
-      const { lastValidBlockHeight, blockhash } =
-      await connection.getLatestBlockhash();
-  
-      let output_tx=await connection.confirmTransaction(
-        {
-          blockhash: blockhash,
-          lastValidBlockHeight: lastValidBlockHeight,
-          signature: tx1,
-        },
-        "confirmed",
+      const poolTokenAccountA_after = await connection.getTokenAccountBalance(
+        accounts.poolAccountA
       );
-      const txDetails = await program.provider.connection.getTransaction(tx1, {
-        maxSupportedTransactionVersion: 0,
-        commitment: "confirmed",
-      });
-      console.log("WITHDRAWAL DETAILS",txDetails.meta.logMessages)
-
-      
+      const poolTokenAccountB_after = await connection.getTokenAccountBalance(
+        accounts.poolAccountB
+      );
+  
+      const traderTokenAccountA_after = await connection.getTokenAccountBalance(
+        accounts.depositorAccountA
+      );
+      const traderTokenAccountB_after = await connection.getTokenAccountBalance(
+        accounts.depositorAccountB
+      );
+  
+  
+  
+      console.log("TOKEN A start in pool : ",poolTokenAccountA_after.value.uiAmount)
+      console.log("TOKEN B start in pool : ",poolTokenAccountB_after.value.uiAmount)
+      console.log("TOKEN A start in user wallet : ",traderTokenAccountA_after.value.uiAmount)
+      console.log("TOKEN B start in user wallet : ",traderTokenAccountB_after.value.uiAmount)
+  
+  
 
   });
 
+  it("Deposit equal amounts third deposit", async () => {
+
+    const traderTokenAccountA_before = await connection.getTokenAccountBalance(
+      accounts.depositorAccountA
+    );
+    const traderTokenAccountB_before = await connection.getTokenAccountBalance(
+      accounts.depositorAccountB
+    );
+
+    const traderLPToken_before = await connection.getTokenAccountBalance(
+      accounts.depositorAccountLiquidity
+    );
+
+    const poolTokenAccountA_before = await connection.getTokenAccountBalance(
+      accounts.poolAccountA
+    );
+    const poolTokenAccountB_before = await connection.getTokenAccountBalance(
+      accounts.poolAccountB
+    );
+
+    let invariant=Number(poolTokenAccountA_before.value.amount)*Number(poolTokenAccountB_before.value.amount)
+    console.log("invariant",invariant)
+    let amountB=invariant/Number(values.depositAmountA)
+    console.log("amountB",amountB,values.depositAmountA)
+    console.log("Depositing ",values.depositAmountA.toString()," of token A ", values.depositAmountA.toString()," of token B")
+    let tx1=await program.methods
+      .depositLiquidity(values.depositAmountA, values.depositAmountA,new BN(0))
+      .accounts(accounts)
+  
+      .rpc();
+
+      get_onchain_logs(connection,tx1)
+      const traderTokenAccountA_after = await connection.getTokenAccountBalance(
+        accounts.depositorAccountA
+      );
+      const traderTokenAccountB_after = await connection.getTokenAccountBalance(
+        accounts.depositorAccountB
+      );
+  
+      const traderLPToken_after = await connection.getTokenAccountBalance(
+        accounts.depositorAccountLiquidity
+      );
+  
+      const poolTokenAccountA_after = await connection.getTokenAccountBalance(
+        accounts.poolAccountA
+      );
+      const poolTokenAccountB_after = await connection.getTokenAccountBalance(
+        accounts.poolAccountB
+      );
+
+      console.log("Token A before and after user side",traderTokenAccountA_before.value.uiAmount,traderTokenAccountA_after.value.uiAmount,)
+      console.log("Token B before and after user side",traderTokenAccountB_before.value.uiAmount,traderTokenAccountB_after.value.uiAmount,)
+      console.log("Token A before and after pool side",poolTokenAccountA_before.value.uiAmount,poolTokenAccountA_after.value.uiAmount,)
+      console.log("Token B before and after pool side",poolTokenAccountB_before.value.uiAmount,poolTokenAccountB_after.value.uiAmount,)
+      console.log("LP token before and after user side",traderLPToken_before.value.uiAmount,traderLPToken_after.value.uiAmount,)
+  
+    });
+
+   
+    it("Second withdraw everything", async () => {
+
+
+    
+      const poolTokenAccountA_before = await connection.getTokenAccountBalance(
+        accounts.poolAccountA
+      );
+      const poolTokenAccountB_before = await connection.getTokenAccountBalance(
+        accounts.poolAccountB
+      );
+  
+      const traderTokenAccountA_before = await connection.getTokenAccountBalance(
+        accounts.depositorAccountA
+      );
+      const traderTokenAccountB_before = await connection.getTokenAccountBalance(
+        accounts.depositorAccountB
+      );
+  
+  
+  
+      console.log("TOKEN A start in pool : ",poolTokenAccountA_before.value.uiAmount)
+      console.log("TOKEN B start in pool : ",poolTokenAccountB_before.value.uiAmount)
+      console.log("TOKEN A start in user wallet : ",traderTokenAccountA_before.value.uiAmount)
+      console.log("TOKEN B start in user wallet : ",traderTokenAccountB_before.value.uiAmount)
+  
+  
+  
+      const traderLPToken_after = await connection.getTokenAccountBalance(
+        accounts.depositorAccountLiquidity
+      );
+  
+      let tx1=await program.methods
+        .withdrawLiquidity(new BN(traderLPToken_after.value.amount),new BN(0),new BN(0))
+        .accounts(accounts)
+        .signers([superUser])
+        .rpc();
+  
+  
+        get_onchain_logs(connection,tx1)
+        
+        const poolTokenAccountA_after = await connection.getTokenAccountBalance(
+          accounts.poolAccountA
+        );
+        const poolTokenAccountB_after = await connection.getTokenAccountBalance(
+          accounts.poolAccountB
+        );
+    
+        const traderTokenAccountA_after = await connection.getTokenAccountBalance(
+          accounts.depositorAccountA
+        );
+        const traderTokenAccountB_after = await connection.getTokenAccountBalance(
+          accounts.depositorAccountB
+        );
+    
+    
+    
+        console.log("TOKEN A end in pool : ",poolTokenAccountA_after.value.uiAmount)
+        console.log("TOKEN B end in pool : ",poolTokenAccountB_after.value.uiAmount)
+        console.log("TOKEN A end in user wallet : ",traderTokenAccountA_after.value.uiAmount)
+        console.log("TOKEN B end in user wallet : ",traderTokenAccountB_after.value.uiAmount)
+    
+    
+  
+    });
+  
   
 
 

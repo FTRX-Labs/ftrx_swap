@@ -41,10 +41,6 @@ pub fn withdraw_liquidity(ctx: Context<WithdrawLiquidity>, amount: u64, amount_e
 
 
     let  mint_liquidity_supply_before = ctx.accounts.mint_liquidity.supply + MINIMUM_LIQUIDITY;
-    let  invariant_before = I64F64::from_num(amount_a_before)
-    .checked_mul(I64F64::from_num(amount_b_before))
-    .unwrap().sqrt();
- 
 
 
     
@@ -120,50 +116,29 @@ pub fn withdraw_liquidity(ctx: Context<WithdrawLiquidity>, amount: u64, amount_e
         return err!(FTRXSwapError::SlippageExceeded);
     }
 
-    ctx.accounts.pool_account_a.reload()?;
-    ctx.accounts.pool_account_b.reload()?;
-    ctx.accounts.mint_liquidity.reload()?;
-
-    let  mint_liquidity_supply_after = ctx.accounts.mint_liquidity.supply + MINIMUM_LIQUIDITY;
-    let acc_a=ctx.accounts.pool_account_a.amount;
-    let acc_b=ctx.accounts.pool_account_b.amount;
-    let ratio_price_after = I64F64::from_num(acc_a)
-    .checked_div(I64F64::from_num(acc_b))
-    .unwrap();
 
 
-    let  invariant_after = I64F64::from_num(acc_a)
-    .checked_mul(I64F64::from_num(acc_b))
-    .unwrap().sqrt();
+    // Checks : we want to have liquidity_reduction/liquidity_before>amount_a_withdrawn/amount_a_before, and same for b
+    // We want the liquidity reduction to be at least more important than the reduction of a and b
+    let ratio_liquidity_check=I64F64::from_num(amount).checked_div(I64F64::from_num(mint_liquidity_supply_before)).unwrap();
 
-
-    // Checks : we want to have liquidity_after/liquidity_before<amount_a_after/amount_a_before
-    let ratio_liquidity_check=I64F64::from_num(mint_liquidity_supply_after).checked_div(I64F64::from_num(mint_liquidity_supply_before)).unwrap();
-    let ratio_liquidity_check2=I64F64::from_num(invariant_after).checked_div(I64F64::from_num(invariant_before)).unwrap();
-    
-    let ratio_token_a_check=I64F64::from_num(acc_a).checked_div(I64F64::from_num(amount_a_before)).unwrap();
-    let ratio_token_b_check=I64F64::from_num(acc_b).checked_div(I64F64::from_num(amount_b_before)).unwrap();
+    let ratio_token_a_check=I64F64::from_num(amount_a).checked_div(I64F64::from_num(amount_a_before)).unwrap();
+    let ratio_token_b_check=I64F64::from_num(amount_b).checked_div(I64F64::from_num(amount_b_before)).unwrap();
     //If thats not true for token a or token b we raise exception
-    if ratio_liquidity_check>ratio_token_a_check || ratio_liquidity_check>ratio_token_b_check{
+    if ratio_liquidity_check<ratio_token_a_check || ratio_liquidity_check<ratio_token_b_check{
         return err!(FTRXSwapError::InconsistentPriceRatioLiquidity);
     }
-    // NEED TO CHECK inconsistancy between ratio_liquidity_check and ratio_liquidity_check2
-    /*
+
+
+    
+    // NEED TO CHECK inconsistancy between ratio_liquidity_check and ratio_liquidity_check
+    
     msg!(
-        "tokenA after {}  tokenB  after {} , liquidity ratio {} {} token a ratio {} token b ratio {}",
-        ctx.accounts.pool_account_a.amount,
-        ctx.accounts.pool_account_b.amount,
+        " liquidity ratio {} token a ratio {} token b ratio {}",
         ratio_liquidity_check,
-        ratio_liquidity_check2,
         ratio_token_a_check,
         ratio_token_b_check
     );
-    */
-
-
-    
-
-
 
    
 
